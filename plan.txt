@@ -1,0 +1,327 @@
+================================================================================
+                    ផែនការ និង របៀបអនុវត្ត LOGIN & LOGOUT
+               (Frontend Coffee Management System - React & Redux)
+================================================================================
+
+I. គោលបំណង និង ទិដ្ឋភាពទូទៅនៃប្រព័ន្ធ Authentication (OVERVIEW)
+--------------------------------------------------------------------------------
+ប្រព័ន្ធ Authentication ក្នុងគម្រោងនេះ ប្រើប្រាស់ JWT Token (JSON Web Token)
+រួមជាមួយ Redux Toolkit សម្រាប់គ្រប់គ្រង State, sessionStorage សម្រាប់រក្សាទុក Session
+ពេល refresh browser, និង Axios Interceptor សម្រាប់ភ្ជាប់ Token ដោយស្វ័យប្រវត្តិទៅកាន់ API។
+
++-----------------------------------------------------------------------------+
+|                          ដំណើរការ LOGIN (LOGIN FLOW)                        |
+|                                                                             |
+| 1. User បញ្ចូល Email & Password នៅលើទម្រង់ Login                             |
+| 2. Submit form -> ហៅ login() ក្នុង AuthService                             |
+| 3. Backend ផ្ទៀងផ្ទាត់ត្រឹមត្រូវ -> ឆ្លើយតប Token មកវិញ                         |
+| 4. ហៅ getCurrentUser(token) -> ទាញយកទិន្នន័យ User (ID, Name, Role, etc.)     |
+| 5. Dispatch loginSuccess({ token, user }) ទៅកាន់ Redux Store                |
+| 6. រក្សាទុក user & token ក្នុង sessionStorage                                |
+| 7. Navigate ទៅកាន់ទំព័រ Dashboard (/dashboard)                               |
++-----------------------------------------------------------------------------+
+
++-----------------------------------------------------------------------------+
+|                         ដំណើរការ LOGOUT (LOGOUT FLOW)                       |
+|                                                                             |
+| 1. User ចុចប៊ូតុង Logout នៅ Sidebar/Navbar (MainLayout.jsx)                 |
+| 2. ហៅ logout() ទៅកាន់ Backend API (AuthService.js) ដើម្បី invalidate token  |
+| 3. Dispatch logout() ទៅ Redux Store -> សម្អាត user = null, token = null    |
+| 4. លុប user និង token ចេញពី sessionStorage                                 |
+| 5. Navigate ឬ Redirect ត្រឡប់មកទំព័រ Login (/) វិញ                           |
++-----------------------------------------------------------------------------+
+
+
+II. ជំហានលម្អិតទាំង ៦ ក្នុងការបង្កើត LOGIN & LOGOUT
+--------------------------------------------------------------------------------
+
+ជំហានទី ១: រៀបចំ Axios Instance & Interceptors (src/service/api.js)
+------------------------------------------------------------------
+Axios ដើរតួជាអ្នកបញ្ជូន HTTP Request។ យើងត្រូវកំណត់ Interceptor ២៖
+1. Request Interceptor:
+   - ពិនិត្យមើលថាតើមាន Token នៅក្នុង Redux Store ឬអត់
+   - បើមាន token ត្រូវបញ្ចូល `Authorization: Bearer <token>` ទៅក្នុង Request Header
+     ស្វ័យប្រវត្តិ គ្រប់ពេលហៅ API ទៅកាន់ Backend។
+2. Response Interceptor:
+   - ចាប់ពិនិត្យ Error Code 401 Unauthorized (ករណី Token ផុតកំណត់ ឬ Token ខុស)
+   - ប្រសិនបើជួប 401 ត្រូវធ្វើការ auto-logout (dispatch logout) និង redirect មក login វិញភ្លាម។
+
+គំរូកូដអនុវត្ត (src/service/api.js):
+----------------------------------
+import axios from "axios";
+import { store } from "../stores/store";
+import { logout } from "../stores/authSlice";
+
+const api = axios.create({
+    baseURL: import.meta.env.VITE_API_URL,
+    headers: { accept: 'application/json' }
+});
+
+// Request Interceptor: បញ្ចូល Token
+api.interceptors.request.use((config) => {
+    const token = store.getState().auth?.token;
+    if (token && !config.headers.Authorization) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
+// Response Interceptor: ចាប់ Error 401
+api.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        if (error.response?.status === 401 && !error.config?.url?.includes('login')) {
+            store.dispatch(logout());
+            if (window.location.pathname !== '/') {
+                window.location.href = '/';
+            }
+        }
+        return Promise.reject(error);
+    }
+);
+
+export default api;
+
+
+ជំហានទី ២: បង្កើត Authentication Service (src/service/AuthService.js)
+--------------------------------------------------------------------
+ជាកន្លែងផ្ទុក Function សម្រាប់ទាក់ទងជាមួយ Backend Auth API៖
+1. login(email, password):
+   - ផ្ញើ POST request ទៅកាន់ endpoint `login`
+   - ទទួលយក token ពី response
+   - ហៅបន្តទៅកាន់ `get-user` ដើម្បីទាញយកទិន្នន័យ user profile
+   - return { token, user } មកវិញ
+2. getCurrentUser(token):
+   - ផ្ញើ GET request ទៅកាន់ endpoint `get-user` ដោយភ្ជាប់ Bearer token
+   - ពិនិត្យថាមាន user ID ឬអត់ រួច return user data
+3. logout():
+   - ផ្ញើ POST request ទៅកាន់ endpoint `logout` ដើម្បីប្រាប់ server ឲ្យលុប token នោះចោល។
+
+គំរូកូដអនុវត្ត (src/service/AuthService.js):
+------------------------------------------
+import api from "./api";
+
+export async function login(email, password) {
+    const response = await api.post('login', { email, password });
+    const data = response.data?.data?.data ?? response.data?.data ?? response.data;
+
+    if (typeof data?.token !== 'string' || !data?.token) {
+        throw new Error(data?.message || 'The login response must contain a token');
+    }
+
+    const user = await getCurrentUser(data.token);
+    return { token: data.token, user };
+}
+
+export async function getCurrentUser(token) {
+    const config = token ? { headers: { Authorization: `Bearer ${token}` } } : {};
+    const respon = await api.get('get-user', config);
+    const user = respon.data?.data ?? respon.data;
+
+    if (!user?.id) {
+        throw new Error('The get-user response must contain a user with an id');
+    }
+    return user;
+}
+
+export async function logout() {
+    await api.post('logout');
+}
+
+
+ជំហានទី ៣: បង្កើត Redux Auth Slice (src/stores/authSlice.js)
+-------------------------------------------------------------
+គ្រប់គ្រង Global State នៃ Auth នៅក្នុង Application ទាំងមូល៖
+1. Initial State:
+   - អានទិន្នន័យ user និង token ពី `sessionStorage` ពេល Refresh page ដើម្បីកុំឲ្យបាត់បង់ Session៖
+     `initialUser = sessionStorage.getItem('user') ? JSON.parse(sessionStorage.getItem('user')) : null`
+     `initialToken = sessionStorage.getItem('token') || null`
+2. Reducers:
+   - loginSuccess(state, action):
+     + កំណត់ `state.user = action.payload.user`
+     + កំណត់ `state.token = action.payload.token`
+     + រក្សាទុក user និង token ក្នុង `sessionStorage.setItem(...)`
+   - logout(state):
+     + កំណត់ `state.user = null`
+     + កំណត់ `state.token = null`
+     + លុបចោល `sessionStorage.removeItem('user')` និង `sessionStorage.removeItem('token')`
+
+គំរូកូដអនុវត្ត (src/stores/authSlice.js):
+---------------------------------------
+import { createSlice } from '@reduxjs/toolkit';
+
+const initialUser = sessionStorage.getItem('user') ? JSON.parse(sessionStorage.getItem('user')) : null;
+const initialToken = sessionStorage.getItem('token') || null;
+
+const authSlice = createSlice({
+    name: 'auth',
+    initialState: {
+        user: initialUser,
+        token: initialToken,
+    },
+    reducers: {
+        loginSuccess(state, action) {
+            state.user = action.payload.user;
+            state.token = action.payload.token;
+
+            sessionStorage.setItem('user', JSON.stringify(action.payload.user));
+            sessionStorage.setItem('token', action.payload.token);
+        },
+        logout(state) {
+            state.user = null;
+            state.token = null;
+
+            sessionStorage.removeItem('user');
+            sessionStorage.removeItem('token');
+        }
+    }
+});
+
+export const { loginSuccess, logout } = authSlice.actions;
+export default authSlice.reducer;
+
+
+ជំហានទី ៤: បង្កើតទំព័រ Login Component (src/pages/Auth/Login.jsx)
+-----------------------------------------------------------------
+1. State ក្នុង Component:
+   - `email`, `password`: សម្រាប់រក្សាទុកតម្លៃពី Form Input
+   - `loading`: បង្ហាញស្ថានភាពកំពុងដំណើរការ (Disable button កុំឲ្យចុចជាន់គ្នា)
+   - `error`: បង្ហាញសារ Error បើសិនជាបញ្ចូល Email/Password ខុស
+2. Form Submission (handleSubmit):
+   - `e.preventDefault()` ដើម្បីកុំឲ្យ reload ទំព័រ
+   - ហៅ `login(email, password)` ពី `AuthService`
+   - បើជោគជ័យ:
+     + `dispatch(loginSuccess({ token, user }))`
+     + `navigate('/dashboard')`
+   - បើបរាជ័យ (Catch):
+     + យក error message ពី backend មកបង្ហាញលើ UI តាមរយៈ `setError(...)`
+3. Auto Redirect:
+   - បើ user ធ្លាប់ Login រួចហើយ (មាន sessionToken) ពេលចូលមកកាន់ទំព័រ Login ត្រូវ Redirect ទៅ `/dashboard` ស្វ័យប្រវត្តិ។
+
+គំរូកូដអនុវត្ត (src/pages/Auth/Login.jsx):
+-----------------------------------------
+import React, { useState, useEffect } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import { useNavigate } from 'react-router-dom';
+import { loginSuccess, logout } from '../../stores/authSlice';
+import { login } from '../../service/AuthService';
+
+const Login = () => {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
+
+    const dispatch = useDispatch();
+    const navigate = useNavigate();
+
+    const sessionToken = sessionStorage.getItem('token');
+
+    useEffect(() => {
+        if (sessionToken) {
+            navigate('/dashboard', { replace: true });
+        }
+    }, [sessionToken, navigate]);
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+
+        try {
+            const { token, user } = await login(email, password);
+            dispatch(loginSuccess({ token, user }));
+            navigate('/dashboard');
+        } catch (err) {
+            setError(
+                err.response?.data?.message || 
+                err.message || 
+                'Login មិនជោគជ័យ សូមពិនិត្យ Email ឬ Password ឡើងវិញ។'
+            );
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <form onSubmit={handleSubmit}>
+            {/* Input Email, Password and Submit Button */}
+        </form>
+    );
+};
+
+
+ជំហានទី ៥: បង្កើតមុខងារ Logout លើ UI (src/layout/MainLayout.jsx)
+-----------------------------------------------------------------
+1. ប៊ូតុង Logout:
+   - ដាក់នៅលើ Sidebar ឬ Top Navbar (ក្បែរ User Profile)
+2. Handle Logout Event (handleLogout):
+   ```javascript
+   const handleLogout = async () => {
+       try {
+           // 1. ប្រាប់ server ឲ្យ revoke/invalidate token
+           await logoutApi();
+       } catch (error) {
+           console.error("Logout API failed:", error);
+       } finally {
+           // 2. សម្អាត State ក្នុង Redux និង sessionStorage ជានិច្ច
+           dispatch(logout());
+           // 3. បញ្ជូន User ត្រឡប់មកទំព័រ Login វិញ
+           navigate('/', { replace: true });
+       }
+   };
+   ```
+   *ចំណាំ*: ត្រូវប្រើប្លុក `finally` ដើម្បីធានាថា ទោះបីជា API Server បរាជ័យ ក៏ Frontend នៅតែ Logout សម្អាត token និង redirect User បានជោគជ័យដែរ។
+
+
+ជំហានទី ៦: ការពារ Route ដោយប្រើ Protected Route (src/components/ProtectedRoute.jsx)
+-----------------------------------------------------------------------------------
+ដើម្បីការពារកុំឲ្យ User ដែលមិនទាន់ Login អាចចូលទៅកាន់ទំព័រខាងក្នុងបាន (ដូចជា Dashboard, Categories, Coffee Menu, POS Sale ...):
+1. ពិនិត្យ Token:
+   - ប្រសិនបើគ្មាន `token` នៅក្នុង `sessionStorage` ទេ:
+     + ប្រើ `<Navigate to="/" replace />` ដើម្បីរុញ User ត្រឡប់ទៅ Login
+2. ពិនិត្យ Sync រវាង Redux និង Session:
+   - ប្រសិនបើតម្លៃក្នុង sessionStorage បាត់បង់ តែ Redux នៅមាន ត្រូវ dispatch `logout()` ដើម្បី clean up
+3. ប្រសិនបើមាន Token ត្រឹមត្រូវ:
+   - បង្ហាញផ្ទាំង Component កូន (`<Outlet />` ឬ `children`) ធម្មតា។
+
+គំរូកូដអនុវត្ត (src/components/ProtectedRoute.jsx):
+---------------------------------------------------
+import React, { useEffect } from 'react';
+import { useSelector, useDispatch } from 'react-redux';
+import { Navigate, Outlet } from 'react-router-dom';
+import { logout } from '../stores/authSlice';
+
+const ProtectedRoute = ({ children }) => {
+    const dispatch = useDispatch();
+    const reduxToken = useSelector((state) => state.auth?.token);
+    const sessionToken = sessionStorage.getItem('token');
+
+    useEffect(() => {
+        if (!sessionToken && reduxToken) {
+            dispatch(logout());
+        }
+    }, [sessionToken, reduxToken, dispatch]);
+
+    if (!sessionToken) {
+        return <Navigate to="/" replace />;
+    }
+
+    return children ? children : <Outlet />;
+};
+
+export default ProtectedRoute;
+
+
+III. គន្លឹះសំខាន់ៗ និង Best Practices (SECURITY & CLEAN CODE)
+--------------------------------------------------------------------------------
+1. sessionStorage vs localStorage:
+   - `sessionStorage`: Token នឹងត្រូវលុបដោយស្វ័យប្រវត្តពេល User បិទ Tab/Browser (មានសុវត្ថិភាពខ្ពស់សម្រាប់ប្រព័ន្ធ POS/Management)។
+   - `localStorage`: រក្សាទុក Token រហូតទាល់តែមានការ Clear (សមរម្យសម្រាប់ "Remember Me")។
+2. Interceptor Error 401 Handling:
+   - ត្រូវពិនិត្យកុំឲ្យ auto-logout លើ url login (`!error.config?.url?.includes('login')`) ដើម្បីកុំឲ្យ redirect loop ពេលវាយ password ខុស។
+3. Cleanup State:
+   - ពេល Logout ត្រូវប្រាកដថាបានលុបទាំង Token, User Profile និង state ផ្សេងៗដែលពាក់ព័ន្ធ (ដូចជា Cart, Selected Items) ចេញពី memory និង storage។
+4. Safe Error Messages:
+   - កុំបង្ហាញ Error ច្បាស់ពេកថាតើខុស Email ឬខុស Password ដើម្បីការពារ Brute Force Attack (ឧ. "Email ឬ Password មិនត្រឹមត្រូវ")។
+================================================================================
